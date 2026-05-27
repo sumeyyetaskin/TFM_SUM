@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# Adapted from original pipeline provided by Marta Ibañez Lligoña
+# Contact: marta.ibanez@vhir.org
+
+## PATHS THAT NEED TO BE DETERMINED:
+## RUN_PATH -> where to find raw fastq files
+## OUT_PATH -> where the trimmed fastq files should be stored
+## LOGS_PATH -> where to add the log files
+## UP_PATH -> directory where the unpaired trimmed fastq files will get stored
+## TRIMMOMATIC PATHS: trimmomatic.jar & adapter fasta
+
+## Set path to raw FASTQ files
+RUN_PATH="/home/sumeyye/Desktop/GBS1_26/data"
+
+## Create output directories
+mkdir -p "/home/sumeyye/Desktop/GBS1_26/results/trimmomatic"
+mkdir -p "/home/sumeyye/Desktop/GBS1_26/results/trimmomatic_UP"
+mkdir -p "/home/sumeyye/Desktop/GBS1_26/results/logs/trimmomatic"
+
+## Define output paths
+OUT_PATH="/home/sumeyye/Desktop/PGBS_26/results/trimmomatic"
+UP_PATH="/home/sumeyye/Desktop/GBS1_26/results/trimmomatic_UP"
+LOGS_PATH="/home/sumeyye/Desktop/GBS1_26/results/logs/trimmomatic"
+
+## Export Trimmomatic paths
+export TMC="/home/sumeyye/anaconda3/envs/metagenomics/share/trimmomatic-0.36-6/trimmomatic.jar"
+
+export TRMPECLP="ILLUMINACLIP:/home/sumeyye/anaconda3/envs/metagenomics/share/trimmomatic-0.36-6/adapters/TruSeq3-PE.fa:2:30:10 \
+LEADING:5 TRAILING:5 SLIDINGWINDOW:4:20 MINLEN:75"
+
+## Get unique sample names (without _R1/_R2)
+FILE_NAMES=$(find "$RUN_PATH" -type f -name "*_R1.fastq.gz" \
+  | sed 's/_R1.fastq.gz//' \
+  | sort)
+
+echo "Samples:"
+echo "$FILE_NAMES"
+
+## Run Trimmomatic
+for name in $FILE_NAMES
+do
+    echo "Processing sample: $(basename $name)"
+
+    in1="${name}_R1.fastq.gz"
+    in2="${name}_R2.fastq.gz"
+
+    out1_P="$OUT_PATH/$(basename $name)_TRIM_R1.fastq.gz"
+    out1_U="$UP_PATH/$(basename $name)_TRIM_UP_R1.fastq.gz"
+    out2_P="$OUT_PATH/$(basename $name)_TRIM_R2.fastq.gz"
+    out2_U="$UP_PATH/$(basename $name)_TRIM_UP_R2.fastq.gz"
+
+    java -jar "$TMC" PE -threads 6 \
+      -trimlog "$LOGS_PATH/trimmomatic.$(basename $name).log" \
+      "$in1" "$in2" \
+      "$out1_P" "$out1_U" \
+      "$out2_P" "$out2_U" \
+      $TRMPECLP
+
+    echo "Finished trimming: $(basename $name)"
+done
