@@ -1,0 +1,147 @@
+############################################################
+# PCoA ANALYSIS OF SERUM MICROBIOME PROFILES
+#
+# Objective:
+# Compare bacterial community composition between
+# Acute and Chronic GBS serum samples using
+# Bray-Curtis dissimilarity and Principal Coordinates
+# Analysis (PCoA).
+#
+# Notes:
+# - Week_0 only (baseline) to avoid pseudo-replication
+# - Week_1 follow-up retained separately (longitudinal)
+# - Batch included in PERMANOVA to control for run effect
+############################################################
+
+
+#############################
+# 1. Load required packages
+#############################
+
+library(readxl)
+library(vegan)
+library(ggplot2)
+
+
+#############################
+# 2. Load metadata
+#############################
+
+metadata <- read_excel("combined_metadata.xlsx")
+
+# Keep only biological samples
+metadata <- metadata[metadata$Type2 == "Sample", ]
+
+
+#############################
+# 3. Load CPM matrices
+#############################
+
+chronic <- read.csv("chronic_CPM_matrix.csv", check.names = FALSE)
+acute   <- read.csv("acute_CPM_matrix.csv",   check.names = FALSE)
+
+
+#############################
+# 4. Merge Acute and Chronic
+#############################
+
+combined <- merge(chronic, acute, by = "Genus", all = TRUE)
+combined[is.na(combined)] <- 0
+
+
+#############################
+# 5. Select Serum + Week_0
+#############################
+
+# Week_1 samples excluded from main analysis
+# to avoid pseudo-replication (same patient, two timepoints).
+# Week_1 is analysed separately as longitudinal (see below).
+
+serum_meta <- metadata[
+  metadata$Sample_Type == "Serum" &
+  metadata$Timepoint   == "Week_0",
+]
+
+serum_samples <- serum_meta$Sample_ID
+
+serum_cpm <- combined[, c("Genus", serum_samples)]
+
+
+#############################
+# 6. Prepare abundance matrix
+#############################
+
+serum_mat <- serum_cpm[, -1]
+rownames(serum_mat) <- serum_cpm$Genus
+
+# Transpose: rows = samples, columns = taxa (required by vegan)
+serum_mat <- t(serum_mat)
+
+
+#############################
+# 7. Compute Bray-Curtis
+#############################
+
+bray_serum <- vegdist(serum_mat, method = "bray")
+
+
+#############################
+# 8. PCoA
+#############################
+
+pcoa_serum <- cmdscale(bray_serum, eig = TRUE, k = 2)
+
+
+#############################
+# 9. Variance explained
+#############################
+
+eig         <- pcoa_serum$eig
+percent_var <- round(100 * eig / sum(eig[eig > 0]), 1)
+percent_var
+
+
+#############################
+# 10. Create plotting table
+#############################
+
+pcoa_df <- data.frame(
+  Sample_ID = rownames(pcoa_serum$points),
+  PCoA1     = pcoa_serum$points[, 1],
+  PCoA2     = pcoa_serum$points[, 2]
+)
+
+pcoa_df <- merge(pcoa_df, serum_meta, by = "Sample_ID")
+
+
+#############################
+# 11. PERMANOVA
+# Batch first (confounded with Condition),
+# then Condition to get its independent effect.
+#############################
+
+perm_result <- adonis2(
+  bray_serum ~ Condition,
+  data         = serum_meta,
+  permutations = 999,
+  by           = "margin"
+)
+
+print(perm_result)
+
+
+#############################
+# 12. Plot PCoA
+#############################
+
+ggplot(
+  pcoa_df,
+  aes(x = PCoA1, y = PCoA2, color = Condition)
+) +
+  geom_point(size = 4, alpha = 0.85) +
+  scale_color_manual(
+    values = c("Chronic" = "#E76F51", "Acute" = "#457B9D")
+  ) +
+  theme_bw(base_size = 13) +
+  labs(
+    title    = "PCoA of Serum Samples"
