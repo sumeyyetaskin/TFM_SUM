@@ -1,0 +1,99 @@
+## --- COVERAGE PLOT FOR SAMPLES --- ##
+## IDENTIFYING PATHOGENS IN MULTIFACTORIAL COMPLEX DISEASES ##
+## R version 4.2.1 (2022-06-23)
+## Copyright: Marta Ibanez Lligona (marta.ibanez@vhir.org)
+
+## --- Loading packages --- ##
+library(readxl)
+library(ggplot2)
+library(dplyr)
+
+## Set working directory
+setwd("/Volumes/MARTA_06/PhD/GBS/SUM")
+
+## --- CMV RESULTS --- ##
+# Load the depth file
+S2_depth <- read.table("2S.depth.txt", 
+                    header = FALSE, 
+                    col.names = c("chrom", "pos", "depth"))
+
+# Plot
+# Option 1: zoom in on covered region
+ggplot(S2_depth, aes(x = pos, y = depth)) +
+  geom_col(width = 500, fill = "#2E6DA4", color = NA) +
+  scale_x_continuous(labels = scales::comma,
+                     name = "Genomic Position") +
+  scale_y_continuous(name = "Coverage") +
+  ggtitle("ALZ_CSF_26") +
+  theme_classic() +
+  theme(
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    panel.grid.major.x = element_blank(),
+    plot.title = element_text(size = 10, face = "bold"),
+    axis.title = element_text(size = 9),
+    axis.text = element_text(size = 8)
+  )
+
+
+## Coverage like always
+
+plot_genome_coverage_depth <- function(depth_file, ref_genome, sample_label, bar_width = 500, color = "steelblue3") {
+  
+  # Load depth file
+  depth <- read.table(depth_file, 
+                      header = FALSE, 
+                      col.names = c("chrom", "position", "coverage"))
+  
+  # Filter for specific reference genome
+  if (!ref_genome %in% unique(depth$chrom)) {
+    stop(paste("Region", ref_genome, "not found in depth file."))
+  }
+  
+  cov_df <- depth[depth$chrom == ref_genome, ]
+  
+  # Plot
+  p <- ggplot(cov_df, aes(x = position, y = coverage)) +
+    geom_col(width = bar_width, fill = color, color = NA) +
+    labs(
+      title = sample_label,
+      x = "Genomic Position",
+      y = "Read depth"
+    ) +
+    scale_x_continuous(breaks = seq(0, max(cov_df$position), by = 20000)) +
+    theme_bw() +
+    theme(
+      panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(size = 10),
+      axis.title = element_text(size = 12),
+      title = element_text(size = 12)
+    )
+  
+  return(list(
+    plot = p,
+    coverage_data = cov_df,
+    mean_coverage = mean(cov_df$coverage)
+  ))
+}
+
+# Usage
+example <- plot_genome_coverage_depth(
+  depth_file = "2S.depth.txt",
+  ref_genome = "NC_001806.2",
+  sample_label = "2S-GBS",
+  bar_width = 500,
+  color = "steelblue3"
+)
+
+# View plot
+example$plot
+
+# Save
+ggsave("CMV_coverage_CSF26.png", example$plot, width = 7, height = 3, dpi = 300)
+
+depth <- read.table("CMV_depth.txt", 
+                    header = FALSE, 
+                    col.names = c("chrom", "position", "coverage"))
+
+unique(depth$chrom)
+
