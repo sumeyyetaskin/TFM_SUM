@@ -1,6 +1,8 @@
 # TFM_SUM
 By: Sumeyye Taskin                                                                                                                                                              
-Supervised by: Dr.Josep Quer                                                                                                                                                                       
+Directed by: Dr. Josep Quer
+Supervised by: Marta Ibanez  
+
 Universitat Autònoma de Barcelona (UAB) and Vall d'Hebron Institut de Recerca (VHIR). Grup Malalties Hepàtiques-Hepatitis viral.                                                
 
 Repository content                                                                                                                                                              
