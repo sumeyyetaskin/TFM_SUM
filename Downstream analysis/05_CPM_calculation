@@ -1,0 +1,103 @@
+# ============================================================
+# CPM Calculation - Chronic Samples
+# Kraken2 Kreport b CPM Summary Table
+# ============================================================
+# This script takes Kraken2 taxonomic classification reports
+# from chronic GBS (Guillain-BarrC) Syndrome) patient samples,
+# builds a genus-level count matrix, and normalizes to CPM.
+# Contaminants and human reads are removed before saving
+# the final matrix for downstream analyses (batch correction,
+# PCoA, differential abundance).
+#
+# Required packages:
+# install.packages(c("tidyverse", "readxl", "tibble", "stringr"))
+
+library(tidyverse)  # data manipulation and piping
+library(readxl)     # reading .xlsx metadata files
+library(tibble)     # modern data frame handling
+library(stringr)    # string trimming for genus names
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+KREPORT_DIR <- "/media/sumeyye/Martuskula_12/GBS1_26/results/KRAKEN_READS/"
+METADATA    <- "path/to/chronic_samples_metadata.xlsx"   # <-- update this path
+DECONTAM    <- "/media/sumeyye/Martuskula_12/GBS1_26/results/KRAKEN_READS/decontam_contaminants.csv"
+OUTPUT_DIR  <- "/media/sumeyye/Martuskula_12/GBS1_26/results/KRAKEN_READS/output/"
+
+# ============================================================
+# 1. READ METADATA - only patient samples (exclude controls)
+# ============================================================
+# We filter to Type2 == "Sample" to exclude extraction controls
+# (C_EXT) and library controls (C_LIB). Controls are used during
+# decontamination (see step 6) but should not be included in the
+# biological analysis since they contain no patient-derived reads.
+
+metadata <- read_excel(METADATA) %>%
+  filter(Type2 == "Sample")
+
+# We define batch membership manually here because these samples
+# were sequenced across two separate Illumina sequencing runs:
+#   Batch1 = first sequencing run
+#   Batch2 = second sequencing run
+# Samples sequenced in different runs can show systematic technical
+# differences (e.g. in read depth, base quality) that are unrelated
+# to biology. We record this so batch effects can be corrected
+# downstream before any biological comparisons are made.
+batch_info <- tibble(
+  Sample_ID = c("GBSC10P_S1_L001", "GBSC10S_S2_L001", "GBSC12P_S5_L001",
+                "GBSC12S_S6_L001", "GBSC13S_S7_L001", "GBSC14S_S8_L001",
+                "GBSC34S_S9_L001"),
+  Batch = "Batch1"  # all chronic samples belong to the same sequencing run (run 1)
+)
+
+# Join batch labels onto metadata so every sample carries its
+# sequencing run information for later use in batch correction.
+metadata <- metadata %>%
+  left_join(batch_info, by = "Sample_ID")
+
+cat("Number of patient samples:", nrow(metadata), "\n")
+cat("Plasma:", sum(metadata$Sample_Type == "Plasma"), "\n")
+cat("Serum:", sum(metadata$Sample_Type == "Serum"), "\n")
+
+# ============================================================
+# 2. KREPORT READING FUNCTION
+# ============================================================
+# Kraken2 outputs one report per sample (.kreport.txt).
+# Each row is a taxonomic node with these columns:
+#   V1: % reads under this clade
+#   V2: clade reads (this node + all descendants)
+#   V3: direct reads (assigned exactly to this node)
+#   V4: rank code (e.g. G = genus, S = species, D = domain)
+#   V5: NCBI taxonomy ID
+#   V6: taxon name
+#
+# We keep only rank == "G" (genus level) because:
+#   - Species-level classification is less reliable with short reads
+#   - Genus level gives enough resolution for community comparisons
+#     while being more robust to reference database gaps
+#
+# We use clade_reads (V2) rather than direct_reads (V3) because
+# clade_reads counts all reads assigned to a genus AND all its
+# descendant species, giving a complete picture of genus abundance.
+
+read_kreport <- function(filepath) {
+  df <- read.delim(filepath, header = FALSE,
+                   col.names = c("pct", "clade_reads", "direct_reads",
+                                 "rank", "taxid", "name"))
+  df %>%
+    filter(rank == "G") %>%
+    mutate(
+      genus = str_trim(name),   # remove leading whitespace added by Kraken2 indentation
+      reads = clade_reads
+    ) %>%
+    select(genus, taxid, reads)
+}
+
+# ============================================================
+# 3. READ ALL KREPORTS - only patient samples
+# ============================================================
+# We loop over the sample IDs in metadata (which already excludes
+# controls) and read each kreport. Using only patient samples here
+# ensures controls never enter the count matrix b
