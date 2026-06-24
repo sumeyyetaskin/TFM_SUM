@@ -1,1 +1,292 @@
-will fill
+# ============================================================
+# ALDEx2 Differential Abundance Analysis
+# Metagenomic NGS - Guillain-Barré Syndrome (GBS)
+# Author: Sumeyye Taskin
+# Supervisor: Dr. Josep Quer Sivila
+# Institution: Vall d'Hebron Institut de Recerca (VHIR)
+# Date: June 2026
+# ============================================================
+# DESCRIPTION:
+# This script performs differential abundance analysis using ALDEx2
+# to identify genera with significantly different relative abundances
+# between chronic and acute GBS patients in serum and plasma samples.
+# Three comparisons are performed:
+#   1. Serum Week 0: Chronic (n=5) vs Acute (n=3) - PRIMARY ANALYSIS
+#   2. Plasma Week 0: Chronic (n=2) vs Acute (n=3) - EXPLORATORY
+#   3. Longitudinal: Week 0 (n=2) vs Week 1 (n=2) - PAIRED, EXPLORATORY
+#
+# STATISTICAL APPROACH:
+# - ALDEx2 uses Monte Carlo Dirichlet sampling to model compositional
+#   uncertainty in count data, making it suitable for low-biomass
+#   metagenomic samples where many genera have zero counts.
+# - The Wilcoxon rank-sum test was selected over Welch's t-test due
+#   to the small sample sizes and non-normal distribution assumption.
+# - denom = "all" uses all features as the denominator for CLR
+#   (centered log-ratio) transformation.
+# - Significance threshold: BH-adjusted Wilcoxon p (wi.eBH) < 0.05
+#   AND absolute effect size > 1.
+# - For longitudinal analysis, paired.test = TRUE accounts for the
+#   matched nature of Week 0 / Week 1 samples from the same patient.
+#
+# INPUT FILES:
+# - data/chronic_counts_clean.csv: Genus-level Kraken2 counts for
+#   chronic GBS samples (post-decontamination)
+# - data/acute_counts_clean.csv: Genus-level Kraken2 counts for
+#   acute GBS samples (post-decontamination)
+#
+# OUTPUT FILES:
+# - figures/aldex2_serum_week0.png: Volcano plot - serum analysis
+# - figures/aldex2_plasma_week0.png: Volcano plot - plasma analysis
+# - figures/aldex2_longitudinal.png: Volcano plot - longitudinal
+# - results/aldex2_serum_significant.csv: Significant genera - serum
+#
+# REFERENCES:
+# Fernandes et al. (2013) PLoS ONE 8(7):e67019
+# Fernandes et al. (2014) Microbiome 2:15
+# ============================================================
+
+# ---- 1. Load Required Libraries ----
+# ALDEx2: Differential abundance analysis for compositional data
+# ggplot2: Data visualization
+# ggrepel: Non-overlapping text labels in volcano plots
+library(ALDEx2)
+library(ggplot2)
+library(ggrepel)
+
+# ---- 2. Load Count Matrices ----
+# These are genus-level Kraken2 read count matrices after decontamination.
+# Decontamination was performed using the decontam R package (Davis et al., 2018)
+# and a curated contaminant watchlist (Ibañez-Lligoña et al., 2026).
+# Rows = genera, Columns = samples
+cat("Loading count matrices...\n")
+chronic_counts <- read.csv("data/chronic_counts_clean.csv", row.names = 1)
+acute_counts   <- read.csv("data/acute_counts_clean.csv", row.names = 1)
+
+cat("Chronic matrix:", nrow(chronic_counts), "genera x", ncol(chronic_counts), "samples\n")
+cat("Acute matrix:", nrow(acute_counts), "genera x", ncol(acute_counts), "samples\n")
+
+# ---- 3. Merge Matrices ----
+# Chronic and acute samples were sequenced in separate runs (Batch 1 and Batch 2).
+# We take the union of all genera detected across both batches.
+# Genera not detected in a given batch are assigned 0 counts.
+# NOTE: Complete confounding of batch and disease condition is a known
+# limitation of this study design.
+cat("\nMerging matrices...\n")
+all_genera <- union(rownames(chronic_counts), rownames(acute_counts))
+
+chronic_full <- chronic_counts[match(all_genera, rownames(chronic_counts)), ]
+rownames(chronic_full) <- all_genera
+chronic_full[is.na(chronic_full)] <- 0  # Replace NA with 0 for missing genera
+
+acute_full <- acute_counts[match(all_genera, rownames(acute_counts)), ]
+rownames(acute_full) <- all_genera
+acute_full[is.na(acute_full)] <- 0
+
+combined_counts <- cbind(chronic_full, acute_full)
+colnames(combined_counts) <- gsub("^X", "", colnames(combined_counts))  # Remove X prefix added by R
+
+cat("Combined matrix:", nrow(combined_counts), "genera x", ncol(combined_counts), "samples\n")
+print(colnames(combined_counts))
+
+# ---- 4. Define Sample Groups ----
+# Samples are defined by their Kraken2 output file identifiers.
+# All analyses are restricted to Week 0 baseline samples to avoid
+# pseudo-replication, except for the longitudinal analysis.
+
+# Serum Week 0 samples
+# Chronic: 5 serum samples from chronic GBS patients
+# Acute: 3 serum samples from acute GBS patients at Week 0
+chronic_serum <- c("GBSC10S_S2_L001", "GBSC12S_S6_L001", "GBSC13S_S7_L001",
+                   "GBSC14S_S8_L001", "GBSC34S_S9_L001")
+acute_serum   <- c("1S_0_A_S2_L001", "2S_0_A_S5_L001", "3S_0_A_S7_L001")
+
+# Plasma Week 0 samples
+# NOTE: Only n=2 chronic plasma samples available - EXPLORATORY ONLY
+chronic_plasma <- c("GBSC10P_S1_L001", "GBSC12P_S5_L001")
+acute_plasma   <- c("1P_0_A_S1_L001", "2P_0_A_S4_L001", "3P_0_A_S6_L001")
+
+# Longitudinal paired serum samples
+# Patients 1A and 3A had paired Week 0 and Week 1 serum samples.
+# Patient 2A is excluded as no Week 1 sample was available.
+week0_serum <- c("1S_0_A_S2_L001", "3S_0_A_S7_L001")
+week1_serum <- c("1S_1W_A_S3_L001", "3S_1W_A_S8_L001")
+
+# ---- 5. ALDEx2 - Serum Week 0 (Chronic vs Acute) ----
+# PRIMARY ANALYSIS
+# Compares bacterial genera between chronic (n=5) and acute (n=3) GBS
+# serum samples at Week 0 baseline.
+cat("\n--- Running ALDEx2: Serum Week 0 (PRIMARY ANALYSIS) ---\n")
+cat("Chronic serum n=5, Acute serum n=3\n")
+
+serum_matrix <- combined_counts[, c(chronic_serum, acute_serum)]
+groups_serum <- c(rep("Chronic", 5), rep("Acute", 3))
+names(groups_serum) <- colnames(serum_matrix)
+
+# Run ALDEx2:
+# mc.samples = 128: Number of Monte Carlo Dirichlet instances
+# test = "t": Runs both Welch's t-test and Wilcoxon test
+# effect = TRUE: Calculates effect sizes
+# denom = "all": Uses all features as CLR denominator
+aldex_serum <- aldex(serum_matrix,
+                     conditions = groups_serum,
+                     mc.samples = 128,
+                     test = "t",
+                     effect = TRUE,
+                     denom = "all")
+
+cat("ALDEx2 serum complete!\n")
+
+# Extract significant genera using Wilcoxon BH-adjusted p-value
+# wi.eBH = Wilcoxon BH-adjusted p-value (preferred over Welch's t-test
+# for small, non-normally distributed samples)
+# we.eBH = Welch's t-test BH-adjusted p-value (shown for reference only)
+sig_serum <- aldex_serum[aldex_serum$wi.eBH < 0.05 & 
+                          abs(aldex_serum$effect) > 1, ]
+cat("Significant genera (wi.eBH < 0.05, |effect| > 1):", nrow(sig_serum), "\n")
+cat("Negative effect = higher in Chronic; Positive effect = higher in Acute\n")
+print(sig_serum[order(abs(sig_serum$effect), decreasing = TRUE),
+                c("effect", "wi.ep", "wi.eBH", "we.ep", "we.eBH")])
+
+# Save significant results
+dir.create("results", showWarnings = FALSE)
+write.csv(sig_serum[order(abs(sig_serum$effect), decreasing = TRUE),
+                    c("effect", "wi.ep", "wi.eBH", "we.ep", "we.eBH")],
+          "results/aldex2_serum_significant.csv")
+
+# Volcano plot for serum
+# X-axis: Effect size (negative = higher in chronic, positive = higher in acute)
+# Y-axis: -log10(BH-adjusted Wilcoxon p-value)
+# Dashed vertical lines: Effect size thresholds of ±1
+# Dashed horizontal line: Significance threshold p = 0.05
+aldex_serum$Genus <- rownames(aldex_serum)
+aldex_serum$significant <- aldex_serum$wi.eBH < 0.05 & abs(aldex_serum$effect) > 1
+aldex_serum$label <- ifelse(aldex_serum$wi.eBH < 0.05 & abs(aldex_serum$effect) > 1,
+                             aldex_serum$Genus, "")
+
+p_serum <- ggplot(aldex_serum, aes(x = effect, y = -log10(wi.eBH))) +
+  geom_point(aes(color = significant), size = 1.5, alpha = 0.7) +
+  scale_color_manual(values = c("FALSE" = "grey60", "TRUE" = "salmon"),
+                     labels = c("Not significant", "Higher in Chronic")) +
+  geom_text_repel(aes(label = label), size = 3, max.overlaps = 20) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  labs(title = "Differential Abundance - Serum (Week 0)",
+       subtitle = "ALDEx2 | Chronic (n=5) vs Acute (n=3)",
+       x = "Effect size",
+       y = "-log10(BH-adjusted p)",
+       color = NULL) +
+  theme_bw()
+
+print(p_serum)
+dir.create("figures", showWarnings = FALSE)
+ggsave("figures/aldex2_serum_week0.png", p_serum,
+       width = 8, height = 6, dpi = 300, bg = "white")
+cat("Serum volcano plot saved to figures/aldex2_serum_week0.png\n")
+
+# ---- 6. ALDEx2 - Plasma Week 0 (Exploratory) ----
+# EXPLORATORY ANALYSIS - interpret with caution (n=2 chronic only)
+# Results should not be used to draw firm biological conclusions.
+cat("\n--- Running ALDEx2: Plasma Week 0 (EXPLORATORY - n=2 chronic) ---\n")
+cat("WARNING: Only 2 chronic plasma samples available. Results are exploratory.\n")
+
+plasma_matrix <- combined_counts[, c(chronic_plasma, acute_plasma)]
+groups_plasma <- c(rep("Chronic", 2), rep("Acute", 3))
+names(groups_plasma) <- colnames(plasma_matrix)
+
+aldex_plasma <- aldex(plasma_matrix,
+                      conditions = groups_plasma,
+                      mc.samples = 128,
+                      test = "t",
+                      effect = TRUE,
+                      denom = "all")
+
+cat("ALDEx2 plasma complete!\n")
+sig_plasma <- aldex_plasma[aldex_plasma$wi.eBH < 0.05 & 
+                            abs(aldex_plasma$effect) > 1, ]
+cat("Significant genera (Exploratory):", nrow(sig_plasma), "\n")
+
+aldex_plasma$Genus <- rownames(aldex_plasma)
+aldex_plasma$significant <- aldex_plasma$wi.eBH < 0.05 & abs(aldex_plasma$effect) > 1
+aldex_plasma$label <- ifelse(aldex_plasma$wi.eBH < 0.05 & abs(aldex_plasma$effect) > 1,
+                              aldex_plasma$Genus, "")
+
+p_plasma <- ggplot(aldex_plasma, aes(x = effect, y = -log10(wi.eBH))) +
+  geom_point(aes(color = significant), size = 1.5, alpha = 0.7) +
+  scale_color_manual(values = c("FALSE" = "grey60", "TRUE" = "salmon"),
+                     labels = c("Not significant", "Higher in Chronic")) +
+  geom_text_repel(aes(label = label), size = 3, max.overlaps = 20) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  labs(title = "Differential Abundance - Plasma (Week 0) - Exploratory",
+       subtitle = "ALDEx2 | Chronic (n=2) vs Acute (n=3)",
+       x = "Effect size",
+       y = "-log10(BH-adjusted p)",
+       color = NULL) +
+  theme_bw()
+
+print(p_plasma)
+ggsave("figures/aldex2_plasma_week0.png", p_plasma,
+       width = 8, height = 6, dpi = 300, bg = "white")
+cat("Plasma volcano plot saved to figures/aldex2_plasma_week0.png\n")
+
+# ---- 7. ALDEx2 - Longitudinal Paired Analysis ----
+# EXPLORATORY PAIRED ANALYSIS
+# Compares bacterial genera between Week 0 and Week 1 in paired acute
+# serum samples from patients 1A and 3A.
+# paired.test = TRUE: Accounts for matched patient samples.
+# NOTE: n=2 per timepoint - results are entirely exploratory.
+cat("\n--- Running ALDEx2: Longitudinal Paired (EXPLORATORY) ---\n")
+cat("Week 0 n=2 (patients 1A, 3A), Week 1 n=2 (patients 1A, 3A)\n")
+cat("WARNING: Very small sample size. Results should not be over-interpreted.\n")
+
+long_matrix <- combined_counts[, c(week0_serum, week1_serum)]
+groups_long <- c(rep("Week_0", 2), rep("Week_1", 2))
+names(groups_long) <- colnames(long_matrix)
+
+# paired.test = TRUE: Uses paired Wilcoxon signed-rank test
+# Sample order matters: Week_0 samples must match Week_1 samples by patient
+# Order: [1A_W0, 3A_W0, 1A_W1, 3A_W1]
+aldex_long <- aldex(long_matrix,
+                    conditions = groups_long,
+                    mc.samples = 128,
+                    test = "t",
+                    effect = TRUE,
+                    denom = "all",
+                    paired.test = TRUE)
+
+cat("ALDEx2 longitudinal complete!\n")
+sig_long <- aldex_long[aldex_long$wi.eBH < 0.05 & 
+                        abs(aldex_long$effect) > 1, ]
+cat("Significant genera (Paired, wi.eBH < 0.05):", nrow(sig_long), "\n")
+if(nrow(sig_long) > 0) {
+  print(sig_long[order(abs(sig_long$effect), decreasing = TRUE),
+                 c("effect", "wi.ep", "wi.eBH")])
+}
+
+aldex_long$Genus <- rownames(aldex_long)
+aldex_long$significant <- aldex_long$wi.eBH < 0.05 & abs(aldex_long$effect) > 1
+aldex_long$label <- ifelse(aldex_long$wi.eBH < 0.05 & abs(aldex_long$effect) > 1,
+                            aldex_long$Genus, "")
+
+# Note: Adding 1e-10 to avoid log(0) for genera with wi.eBH = 0
+p_long <- ggplot(aldex_long, aes(x = effect, y = -log10(wi.eBH + 1e-10))) +
+  geom_point(aes(color = significant), size = 1.5, alpha = 0.7) +
+  scale_color_manual(values = c("FALSE" = "grey60", "TRUE" = "salmon"),
+                     labels = c("Not significant", "Higher in Week_1")) +
+  geom_text_repel(aes(label = label), size = 3, max.overlaps = 20) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  labs(title = "Differential Abundance - Longitudinal (Acute Serum)",
+       subtitle = "ALDEx2 Paired | Week_0 (n=2) vs Week_1 (n=2)",
+       x = "Effect size",
+       y = "-log10(BH-adjusted p)",
+       color = NULL) +
+  theme_bw()
+
+print(p_long)
+ggsave("figures/aldex2_longitudinal.png", p_long,
+       width = 8, height = 6, dpi = 300, bg = "white")
+cat("Longitudinal volcano plot saved to figures/aldex2_longitudinal.png\n")
+
+cat("\n=== All ALDEx2 analyses complete ===\n")
+cat("Output files saved in figures/ and results/ directories\n")
