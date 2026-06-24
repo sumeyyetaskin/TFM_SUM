@@ -1,0 +1,327 @@
+# ============================================================
+# PERMANOVA and PCoA Beta Diversity Analysis
+# Metagenomic NGS - Guillain-Barré Syndrome (GBS)
+# Author: Sumeyye Taskin
+# Supervisor: Dr. Josep Quer Sivila
+# Institution: Vall d'Hebron Institut de Recerca (VHIR)
+# Date: June 2026
+# ============================================================
+# DESCRIPTION:
+# This script performs beta diversity analysis using:
+#   1. Principal Coordinates Analysis (PCoA) based on Bray-Curtis
+#      dissimilarity to visualize microbial community composition
+#   2. PERMANOVA (Permutational Multivariate Analysis of Variance)
+#      to statistically test differences in community composition
+#
+# Three comparisons are performed:
+#   1. Serum Week 0: Chronic (n=5) vs Acute (n=3) - PRIMARY
+#   2. Plasma vs Serum: Sample type comparison (Week 0, all samples)
+#   3. Longitudinal: Week 0 vs Week 1 in acute serum - EXPLORATORY
+#
+# STATISTICAL APPROACH:
+# - Bray-Curtis dissimilarity is used as it accounts for both
+#   presence/absence and abundance of taxa
+# - PERMANOVA (adonis2) tests whether group centroids differ more
+#   than expected by chance (999 permutations)
+# - R² value indicates proportion of variance explained by grouping
+# - PCoA (cmdscale) provides low-dimensional visualization
+#
+# INPUT:
+# - data/chronic_counts_clean.csv
+# - data/acute_counts_clean.csv
+#
+# OUTPUT:
+# - figures/pcoa_serum_week0.png
+# - figures/pcoa_plasma_vs_serum.png
+# - figures/pcoa_longitudinal.png
+# - results/permanova_results.txt
+#
+# REFERENCES:
+# Oksanen et al. (2022) vegan: Community Ecology Package
+# ============================================================
+
+# ---- 1. Load Required Libraries ----
+# vegan: PERMANOVA (adonis2) and Bray-Curtis dissimilarity
+# ggplot2: Visualization
+# ggrepel: Non-overlapping sample labels
+library(vegan)
+library(ggplot2)
+library(ggrepel)
+
+# ---- 2. Load and Merge Count Matrices ----
+# Genus-level Kraken2 counts after decontamination
+cat("Loading count matrices...\n")
+chronic_counts <- read.csv("data/chronic_counts_clean.csv", row.names = 1)
+acute_counts   <- read.csv("data/acute_counts_clean.csv", row.names = 1)
+
+# Merge chronic and acute matrices
+all_genera <- union(rownames(chronic_counts), rownames(acute_counts))
+
+chronic_full <- chronic_counts[match(all_genera, rownames(chronic_counts)), ]
+rownames(chronic_full) <- all_genera
+chronic_full[is.na(chronic_full)] <- 0
+
+acute_full <- acute_counts[match(all_genera, rownames(acute_counts)), ]
+rownames(acute_full) <- all_genera
+acute_full[is.na(acute_full)] <- 0
+
+combined_counts <- cbind(chronic_full, acute_full)
+colnames(combined_counts) <- gsub("^X", "", colnames(combined_counts))
+
+cat("Combined matrix:", nrow(combined_counts), "genera x",
+    ncol(combined_counts), "samples\n")
+
+# ---- 3. Define Sample Groups ----
+# Serum Week 0 samples
+chronic_serum <- c("GBSC10S_S2_L001", "GBSC12S_S6_L001", "GBSC13S_S7_L001",
+                   "GBSC14S_S8_L001", "GBSC34S_S9_L001")
+acute_serum   <- c("1S_0_A_S2_L001", "2S_0_A_S5_L001", "3S_0_A_S7_L001")
+
+# Plasma Week 0 samples
+chronic_plasma <- c("GBSC10P_S1_L001", "GBSC12P_S5_L001")
+acute_plasma   <- c("1P_0_A_S1_L001", "2P_0_A_S4_L001", "3P_0_A_S6_L001")
+
+# Longitudinal paired serum samples
+week0_serum <- c("1S_0_A_S2_L001", "2S_0_A_S5_L001", "3S_0_A_S7_L001")
+week1_serum <- c("1S_1W_A_S3_L001", "3S_1W_A_S8_L001")
+
+# Create output directories
+dir.create("figures", showWarnings = FALSE)
+dir.create("results", showWarnings = FALSE)
+
+# Open results file
+sink("results/permanova_results.txt")
+cat("PERMANOVA Results - GBS mNGS Study\n")
+cat("Date:", format(Sys.time(), "%Y-%m-%d"), "\n")
+cat(rep("=", 50), "\n\n")
+sink()
+
+# ---- 4. Helper Functions ----
+# Function to compute PCoA from count matrix
+compute_pcoa <- function(count_matrix) {
+  # Transpose: vegan requires samples as rows
+  mat_t <- t(count_matrix)
+  # Remove genera with zero counts across all samples in subset
+  mat_t <- mat_t[, colSums(mat_t) > 0]
+  # Compute Bray-Curtis dissimilarity
+  bc_dist <- vegdist(mat_t, method = "bray")
+  # PCoA using classical multidimensional scaling
+  pcoa_result <- cmdscale(bc_dist, eig = TRUE, k = 2)
+  return(list(pcoa = pcoa_result, dist = bc_dist))
+}
+
+# Function to extract variance explained by each axis
+get_variance <- function(pcoa_result) {
+  eig <- pcoa_result$eig
+  var_explained <- round(eig / sum(eig[eig > 0]) * 100, 1)
+  return(var_explained)
+}
+
+# ---- 5. Analysis 1: Serum Week 0 - Chronic vs Acute ----
+# PRIMARY ANALYSIS
+# Tests whether chronic and acute GBS patients have different
+# microbial community composition in serum at baseline (Week 0)
+cat("\n--- Analysis 1: Serum Week 0 - Chronic vs Acute ---\n")
+
+serum_matrix <- combined_counts[, c(chronic_serum, acute_serum)]
+serum_matrix <- serum_matrix[rowSums(serum_matrix) > 0, ]
+
+result_serum <- compute_pcoa(serum_matrix)
+var_serum    <- get_variance(result_serum$pcoa)
+
+# Metadata for serum samples
+meta_serum <- data.frame(
+  condition = factor(c(rep("Chronic", 5), rep("Acute", 3))),
+  row.names = c(chronic_serum, acute_serum)
+)
+
+# PERMANOVA test
+# Tests: Does disease condition (chronic vs acute) explain
+# significant variance in Bray-Curtis distances?
+set.seed(123)  # For reproducibility
+perm_serum <- adonis2(result_serum$dist ~ condition,
+                      data = meta_serum,
+                      permutations = 999)
+
+cat("PERMANOVA - Serum Week 0 (Chronic vs Acute):\n")
+print(perm_serum)
+
+# Save results
+sink("results/permanova_results.txt", append = TRUE)
+cat("Analysis 1: Serum Week 0 - Chronic vs Acute\n")
+cat(rep("-", 40), "\n")
+print(perm_serum)
+cat("\n")
+sink()
+
+# PCoA plot - Serum Week 0
+pcoa_df_serum <- data.frame(
+  PCoA1     = result_serum$pcoa$points[, 1],
+  PCoA2     = result_serum$pcoa$points[, 2],
+  Condition = meta_serum$condition,
+  Sample    = rownames(meta_serum)
+)
+
+p_serum_pcoa <- ggplot(pcoa_df_serum, 
+                        aes(x = PCoA1, y = PCoA2, color = Condition)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_manual(values = c("Chronic" = "#E08060", "Acute" = "#6090C0")) +
+  labs(
+    title    = "PCoA of Serum Samples - Week 0",
+    subtitle = paste0("Bray-Curtis | Chronic (n=5) vs Acute (n=3)\n",
+                      "PERMANOVA: R²=", round(perm_serum$R2[1], 3),
+                      ", F=", round(perm_serum$F[1], 2),
+                      ", p=", perm_serum$`Pr(>F)`[1]),
+    x     = paste0("PCoA1 (", var_serum[1], "%)"),
+    y     = paste0("PCoA2 (", var_serum[2], "%)"),
+    color = "Condition"
+  ) +
+  theme_bw() +
+  theme(plot.subtitle = element_text(size = 9))
+
+print(p_serum_pcoa)
+ggsave("figures/pcoa_serum_week0.png", p_serum_pcoa,
+       width = 7, height = 6, dpi = 300, bg = "white")
+cat("Serum PCoA saved to figures/pcoa_serum_week0.png\n")
+
+# ---- 6. Analysis 2: Plasma vs Serum - Sample Type Comparison ----
+# Tests whether sample type (plasma vs serum) explains differences
+# in microbial community composition across all Week 0 samples.
+cat("\n--- Analysis 2: Plasma vs Serum - Sample Type Comparison ---\n")
+
+all_week0_cols <- c(chronic_plasma, acute_plasma, chronic_serum, acute_serum)
+week0_matrix   <- combined_counts[, all_week0_cols]
+week0_matrix   <- week0_matrix[rowSums(week0_matrix) > 0, ]
+
+result_week0 <- compute_pcoa(week0_matrix)
+var_week0    <- get_variance(result_week0$pcoa)
+
+# Metadata: sample type and disease condition
+meta_week0 <- data.frame(
+  sample_type = factor(c(rep("Plasma", 2), rep("Plasma", 3),
+                         rep("Serum", 5),  rep("Serum", 3))),
+  condition   = factor(c(rep("Chronic", 2), rep("Acute", 3),
+                         rep("Chronic", 5), rep("Acute", 3))),
+  row.names   = all_week0_cols
+)
+
+# PERMANOVA: Does sample type explain community composition variance?
+set.seed(123)
+perm_type <- adonis2(result_week0$dist ~ sample_type,
+                     data = meta_week0,
+                     permutations = 999)
+
+cat("PERMANOVA - Plasma vs Serum:\n")
+print(perm_type)
+
+sink("results/permanova_results.txt", append = TRUE)
+cat("Analysis 2: Plasma vs Serum - Sample Type\n")
+cat(rep("-", 40), "\n")
+print(perm_type)
+cat("\n")
+sink()
+
+# PCoA plot - Plasma vs Serum
+pcoa_df_week0 <- data.frame(
+  PCoA1       = result_week0$pcoa$points[, 1],
+  PCoA2       = result_week0$pcoa$points[, 2],
+  Sample_Type = meta_week0$sample_type,
+  Condition   = meta_week0$condition,
+  Sample      = rownames(meta_week0)
+)
+
+p_type_pcoa <- ggplot(pcoa_df_week0,
+                       aes(x = PCoA1, y = PCoA2,
+                           color = Sample_Type, shape = Condition)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_manual(values = c("Plasma" = "#5B8DB8", "Serum" = "#E8A838")) +
+  scale_shape_manual(values = c("Chronic" = 16, "Acute" = 17)) +
+  labs(
+    title    = "PCoA - Plasma vs Serum (Week 0)",
+    subtitle = paste0("Bray-Curtis | Color = Sample Type, Shape = Condition\n",
+                      "PERMANOVA: R²=", round(perm_type$R2[1], 3),
+                      ", F=", round(perm_type$F[1], 2),
+                      ", p=", perm_type$`Pr(>F)`[1]),
+    x      = paste0("PCoA1 (", var_week0[1], "%)"),
+    y      = paste0("PCoA2 (", var_week0[2], "%)"),
+    color  = "Sample Type",
+    shape  = "Condition"
+  ) +
+  theme_bw() +
+  theme(plot.subtitle = element_text(size = 9))
+
+print(p_type_pcoa)
+ggsave("figures/pcoa_plasma_vs_serum.png", p_type_pcoa,
+       width = 7, height = 6, dpi = 300, bg = "white")
+cat("Plasma vs Serum PCoA saved to figures/pcoa_plasma_vs_serum.png\n")
+
+# ---- 7. Analysis 3: Longitudinal - Week 0 vs Week 1 ----
+# EXPLORATORY ANALYSIS
+# Visualizes temporal shifts in microbial community composition
+# in paired acute serum samples.
+# NOTE: No formal PERMANOVA performed due to very small sample size (n=2).
+cat("\n--- Analysis 3: Longitudinal - Week 0 vs Week 1 (EXPLORATORY) ---\n")
+cat("WARNING: n=2 per timepoint. No formal PERMANOVA performed.\n")
+
+# Include all 5 acute serum samples for visualization
+# (Week 0: patients 1A, 2A, 3A; Week 1: patients 1A, 3A)
+long_cols   <- c(week0_serum, week1_serum)
+long_matrix <- combined_counts[, long_cols]
+long_matrix <- long_matrix[rowSums(long_matrix) > 0, ]
+
+result_long <- compute_pcoa(long_matrix)
+var_long    <- get_variance(result_long$pcoa)
+
+# Metadata for longitudinal samples
+meta_long <- data.frame(
+  timepoint = factor(c(rep("Week_0", 3), rep("Week_1", 2)),
+                     levels = c("Week_0", "Week_1")),
+  patient   = c("1A", "2A", "3A", "1A", "3A"),
+  row.names = long_cols
+)
+
+# PCoA plot with dashed lines connecting paired samples
+pcoa_df_long <- data.frame(
+  PCoA1     = result_long$pcoa$points[, 1],
+  PCoA2     = result_long$pcoa$points[, 2],
+  Timepoint = meta_long$timepoint,
+  Patient   = meta_long$patient,
+  Sample    = rownames(meta_long)
+)
+
+# Create paired lines connecting Week 0 and Week 1 for same patient
+paired_lines <- merge(
+  pcoa_df_long[pcoa_df_long$Timepoint == "Week_0" & 
+               pcoa_df_long$Patient %in% c("1A", "3A"),],
+  pcoa_df_long[pcoa_df_long$Timepoint == "Week_1",],
+  by = "Patient",
+  suffixes = c("_W0", "_W1")
+)
+
+p_long_pcoa <- ggplot(pcoa_df_long,
+                       aes(x = PCoA1, y = PCoA2, color = Timepoint)) +
+  # Dashed lines connecting paired samples
+  geom_segment(data = paired_lines,
+               aes(x = PCoA1_W0, y = PCoA2_W0,
+                   xend = PCoA1_W1, yend = PCoA2_W1),
+               linetype = "dashed", color = "grey50", linewidth = 0.7) +
+  geom_point(size = 3.5, alpha = 0.9) +
+  geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 10) +
+  scale_color_manual(values = c("Week_0" = "#4DAF9C", "Week_1" = "#F0B95A")) +
+  labs(
+    title    = "PCoA - Acute Serum Longitudinal",
+    subtitle = "Week_0 vs Week_1 | Dashed lines connect same patient",
+    x        = paste0("PCoA1 (", var_long[1], "%)"),
+    y        = paste0("PCoA2 (", var_long[2], "%)"),
+    color    = "Timepoint"
+  ) +
+  theme_bw()
+
+print(p_long_pcoa)
+ggsave("figures/pcoa_longitudinal.png", p_long_pcoa,
+       width = 7, height = 6, dpi = 300, bg = "white")
+cat("Longitudinal PCoA saved to figures/pcoa_longitudinal.png\n")
+
+cat("\n=== All PERMANOVA and PCoA analyses complete ===\n")
+cat("PERMANOVA results saved to results/permanova_results.txt\n")
+cat("PCoA figures saved in figures/ directory\n")
